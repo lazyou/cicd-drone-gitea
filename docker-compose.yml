@@ -1,0 +1,106 @@
+version: '3.9'
+# 创建自定义网络
+networks:
+  drone:
+    name: drone
+    driver: bridge
+services:
+  # 数据库服务
+  db:
+    image: postgres:latest
+    container_name: drone_db
+    restart: always
+    networks:
+      - drone # 加入到drone网络
+    ports:
+      - '7931:5432'
+    environment:
+      - POSTGRES_USER=drone # PGSQL默认用户
+      - POSTGRES_PASSWORD=drone # PGSQL默认密码
+      - POSTGRES_DB=drone # PGSQL默认数据库
+    volumes:
+      - /volumes/drone/db:/var/lib/postgresql/data
+  # gitea 服务
+  gitea:
+    image: gitea/gitea:latest # 直接装最新版就好了，没啥好选的，随意
+    container_name: gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__webhook__SKIP_TLS_VERIFY=true # webhook 跳过 tls 验证
+      - GITEA__webhook__DELIVER_TIMEOUT=10 # webhook 超时时间
+    restart: always
+    networks:
+      - drone
+    volumes:
+      - ./data:/data  # /home/data可以替换成你想要的挂载目录
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "33000:3000" # 外网33000对应内部容器3000端口
+      - "33333:22" # 外网33333对应内部容器22端口
+
+  # Drone Server 服务
+  server:
+    image: drone/drone:2.8.0 # 目前drone最新版本为 2.8.0
+    container_name: drone_server
+    restart: always
+    networks:
+      - drone # 加入到drone网络
+    ports:
+      - '7929:80'
+    environment:
+      # （必填）设置服务器的协议，使用：http 或 https。 如果您已经配置 ssl 或 acme，此字段默认为 https
+      - DRONE_SERVER_PROTO=http # 访问协议，创建webHooks和重定向
+      # （必填）您访问 Drone 时所用的域名或 IP 地址。如果使用 IP 地址，还应该包含端口
+      - DRONE_SERVER_HOST=http://localhost:7929 # 主机名称，创建webHooks和重定向
+      # 此属性是设置 Server（服务器） 与 Runner（执行器） 之间通讯的密钥
+      # Server（服务器） 与 Runner（执行器） 必须设置相同的密钥值才允许通信。
+      # 可以在 服务器(Linux) 中使用 openssl 生成密钥 (openssl rand -hex 16)
+      - DRONE_RPC_SECRET=55bc37224de80f0a270065c12bf1bbc8 # 与 drone runner 通讯的密钥
+      # 此属性是设置 Drone 管理员。注意：username 必须设置为 OAuth 用户（Gitea 的用户名），否则不具有管理员权限。
+      # 非管理员会少部分功能，例如不许设置 Trusted 属性
+      - DRONE_USER_CREATE=admin01:admin112233,admin:true # 管理员账户
+      - DRONE_DATABASE_DRIVER=postgres # 数据库类型
+      - DRONE_DATABASE_DATASOURCE=postgres://drone:drone@db/drone?sslmode=disable # 数据库连接
+      # 默认情况下 OAuth 只作用于登录操作。但存储库设置为私有时，需要登录用户才允许拉取代码，此时需要将此属性设置为 true
+      - DRONE_GIT_ALWAYS_AUTH=true # 使用 oauth 身份验证信息拉取代码
+      # gitea服务器地址 (无法使用本地地址+端口，尝试使用穿透--亲测可行)
+      - DRONE_GITEA_SERVER=http://gbg3ti.natappfree.cc
+      # （必填）您的 Gitea OAuth 客户端ID
+      - DRONE_GITEA_CLIENT_ID=c1efd3a8-61af-43c9-81b3-915e968c677d # gitea 客户端 id
+      # （必填）您的 Gitea OAuth 客户端密钥
+      - DRONE_GITEA_CLIENT_SECRET=gto_bctpokbhs5ctayb7mgmerd5zxyrykdnggj5taoerdtnnmssfyprq # gitea 客户端 密钥
+      - DRONE_GITEA_SKIP_VERIFY=false # 禁用 gitea 链接时 tls 验证
+    volumes:
+      - /volumes/drone/server:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - db
+      - gitea
+
+  # Drone Docker Runner
+  runner:
+    image: drone/drone-runner-docker:1.8.0 # 目前drone-runner-docker最新版本为 1.8.0
+    container_name: drone_runner
+    restart: always
+    networks:
+      - drone # 加入到drone网络
+    ports:
+      - '7930:3000'
+    environment:
+      - DRONE_RUNNER_NAME=docker-runner
+      - DRONE_RUNNER_CAPACITY=10 # 限制runner可执行的并发管道数量
+      # 这两个属性设置通信 Server（服务器） 的协议和主机名。 主机名使用 server-name
+      - DRONE_RPC_PROTO=http # 访问drone server 协议
+      - DRONE_RPC_HOST=server # 访问drone server 服务器地址
+      # 在准备工作中使用 openssl rand -hex 16 生成的共享密钥。这个密钥用于验证 Drone Server 和 Runner 之间的 RPC 连接。
+      # 因此，在 Server 和 Runner 上都必须使用相同的密钥。
+      - DRONE_RPC_SECRET=55bc37224de80f0a270065c12bf1bbc8 # 与 drone server 通讯的密钥
+      # Runner（执行器） 也具有 UI 展示页面，可以查看当前执行器的执行信息。这两个属性是设置 UI 展示页面的用户名称和密码
+      - DRONE_UI_USERNAME=admin01 # Drone Runner 的 UI 用户账号
+      - DRONE_UI_PASSWORD=admin112233 # Drone Runner 的 UI 用户密码
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock'
+    depends_on:
+      - server
